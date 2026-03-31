@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Social Blocker</string>
+    <!-- This is the description the user will see in their phone's Accessibility Settings -->
+    <string name="accessibility_desc">Blocks addictive short videos, limits Instagram scrolling, and enforces bedtime screen locks to help you maintain healthy digital habits.</string>
+</resources>
