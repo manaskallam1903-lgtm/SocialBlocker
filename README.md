@@ -22,3 +22,24 @@ Built programmatically using pure Kotlin, the app features a premium, minimalist
 * **Ignore Battery Optimization:** Essential to ensure the blocker engine runs uninterrupted in the background.
 
 DISCLAIMER: USED AI TO CODE THIS APP
+
+## Instructions on How to Install the App
+
+**Install the APK:**
+* When they click the file, their phone will say "For your security, your phone is not allowed to install unknown apps from this source." Tell them to click Settings on that pop-up and toggle Allow from this source.
+
+* Bypass Play Protect: Google Play Protect might say "Unsafe app blocked". Tell them to click More details -> Install anyway.
+
+**The Android Bypass:**
+
+* Open the app and tap "1. Enable Accessibility".
+
+* It will say "Restricted Setting". Click OK.
+
+* Go to the phone's Settings -> Apps -> Social Blocker.
+
+* Tap the 3 dots in the top right corner and tap Allow restricted settings.
+
+* Go back into the app and try turning Accessibility on again.
+
+* Battery Optimization: To prevent the app from being killed by the system, go to Settings -> Apps -> Social Blocker -> Battery and set it to "Unrestricted".
