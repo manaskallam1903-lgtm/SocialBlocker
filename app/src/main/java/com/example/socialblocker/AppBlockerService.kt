@@ -144,9 +144,13 @@ class AppBlockerService : AccessibilityService() {
 
     private fun isAppMentionedOnScreen(node: AccessibilityNodeInfo?): Boolean {
         if (node == null) return false
-        val text = node.text?.toString()?.lowercase() ?: ""
-        val desc = node.contentDescription?.toString()?.lowercase() ?: ""
-        if (text.contains("social blocker") || desc.contains("social blocker")) return true
+
+        // CRITICAL FIX: Strip all spaces! This catches "Social Blocker" AND "SocialBlocker"
+        val text = node.text?.toString()?.lowercase()?.replace(" ", "") ?: ""
+        val desc = node.contentDescription?.toString()?.lowercase()?.replace(" ", "") ?: ""
+
+        if (text.contains("socialblocker") || desc.contains("socialblocker")) return true
+
         for (i in 0 until node.childCount) {
             if (isAppMentionedOnScreen(node.getChild(i))) return true
         }

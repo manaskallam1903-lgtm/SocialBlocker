@@ -193,6 +193,11 @@ class MainActivity : AppCompatActivity() {
         addSectionHeader(contentLayout, "System Configuration")
         val permissionsCard = createCardLayout(cardBgColor, strokeColor)
         addButtonToCard(permissionsCard, "1. Enable Accessibility", buttonBgColor, buttonTextColor) {
+            // CRITICAL FIX: Block the shortcut button during Hardcore Mode
+            if (isAppLocked()) {
+                Toast.makeText(this, "Settings locked by Hardcore Mode! Request an unlock first.", Toast.LENGTH_LONG).show()
+                return@addButtonToCard
+            }
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         }
         addButtonToCard(permissionsCard, "2. System Permissions", buttonBgColor, buttonTextColor) {
