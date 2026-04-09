@@ -26,9 +26,9 @@ DISCLAIMER: USED AI TO CODE THIS APP
 ## Instructions on How to Install the App
 
 **Install the APK:**
-* When they click the file, their phone will say "For your security, your phone is not allowed to install unknown apps from this source." Tell them to click Settings on that pop-up and toggle Allow from this source.
+* When you click the file, your phone will say "For your security, your phone is not allowed to install unknown apps from this source." Click Settings on that pop-up and toggle Allow from this source.
 
-* Bypass Play Protect: Google Play Protect might say "Unsafe app blocked". Tell them to click More details -> Install anyway.
+* Bypass Play Protect: Google Play Protect might say "Unsafe app blocked". Go to play store -> profile -> play protect -> Turn it off.
 
 **The Android Bypass:**
 
@@ -43,3 +43,5 @@ DISCLAIMER: USED AI TO CODE THIS APP
 * Go back into the app and try turning Accessibility on again.
 
 * Battery Optimization: To prevent the app from being killed by the system, go to Settings -> Apps -> Social Blocker -> Battery and set it to "Unrestricted".
+
+* Turn play protect back on once the app is installed. 
