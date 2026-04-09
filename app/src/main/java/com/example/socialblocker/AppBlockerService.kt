@@ -7,8 +7,13 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.PixelFormat
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.media.AudioManager
 import android.os.Handler
 import android.os.Looper
@@ -19,7 +24,9 @@ import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import java.util.Calendar
@@ -40,6 +47,19 @@ class AppBlockerService : AccessibilityService() {
     // App Timer Tracking
     private var currentForegroundApp: String? = null
     private val timerHandler = Handler(Looper.getMainLooper())
+    private var tickCount = 0
+
+    // Anti-Loophole: Penalty timer for trying to access settings
+    private var hardcoreBanEndTime = 0L
+
+    // --- FEATURE OVERLAYS ---
+    private var floatingTimerView: View? = null
+    private var tvFloatingTimer: TextView? = null
+
+    private var cooldownOverlayView: View? = null
+    private var radialTimerView: RadialTimerView? = null
+    private var tvCooldownDigital: TextView? = null
+    private var tvCooldownEnd: TextView? = null
 
     companion object {
         var isCallBypassActive = false
@@ -52,7 +72,6 @@ class AppBlockerService : AccessibilityService() {
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == Intent.ACTION_SCREEN_OFF) {
-                // Instantly kill the 15-min bypass the first time they lock their phone
                 if (isPostCallBypassActive) {
                     isPostCallBypassActive = false
                     Log.d("SocialBlocker", "Screen turned off. Post-call bypass terminated.")
@@ -63,6 +82,9 @@ class AppBlockerService : AccessibilityService() {
 
     private val timerRunnable = object : Runnable {
         override fun run() {
+            tickCount++
+            val shouldIncrementUsage = (tickCount % 10 == 0) // 10 ticks of 100ms = 1 full second
+
             if (isPostCallBypassActive && System.currentTimeMillis() > postCallBypassEndTime) {
                 isPostCallBypassActive = false
                 showToast("Post-call bypass expired. Bedtime reactivated.")
@@ -75,28 +97,71 @@ class AppBlockerService : AccessibilityService() {
             }
 
             if (overlayView == null && !isManualBypassActive && !isPostCallBypassActive) {
-                checkAppTimers()
+                checkAppTimers(shouldIncrementUsage)
             }
 
-            timerHandler.postDelayed(this, 1000)
+            // ANTI-LOOPHOLE ACTIVE POLLING (Running at 100ms)
+            if (isHardcoreLocked() && (currentForegroundApp == "com.android.settings" || currentForegroundApp == "com.google.android.packageinstaller")) {
+                if (System.currentTimeMillis() < hardcoreBanEndTime) {
+                    triggerHomeBlock("Hardcore Lockout: Wait before trying again!", force = true)
+                }
+                else if (isAppMentionedOnScreen(rootInActiveWindow)) {
+                    hardcoreBanEndTime = System.currentTimeMillis() + 5000L
+                    triggerHomeBlock("Hardcore Mode: You cannot modify Social Blocker!", force = true)
+                }
+            }
+
+            timerHandler.postDelayed(this, 100)
         }
     }
 
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
     override fun onServiceConnected() {
         super.onServiceConnected()
-        Log.d("SocialBlocker", "Service Connected!")
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         timerHandler.post(timerRunnable)
 
-        // Register Screen Off Receiver
         val filter = IntentFilter(Intent.ACTION_SCREEN_OFF)
         registerReceiver(screenReceiver, filter)
+    }
+
+    // --- BUG FIX: Kill Hardcore Mode if accessibility is revoked ---
+    override fun onUnbind(intent: Intent?): Boolean {
+        val prefs = getSharedPreferences("BedtimePrefs", Context.MODE_PRIVATE)
+        // CRITICAL FIX: Use .commit() to enforce a blocking, instant write to disk
+        // before the Android OS can kill the process completely.
+        prefs.edit()
+            .putBoolean("hardcore_mode", false)
+            .putLong("hardcore_unlock_request_time", 0L)
+            .commit()
+        Log.d("SocialBlocker", "Accessibility Disabled! Hardcore Mode terminated.")
+        return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
         super.onDestroy()
         unregisterReceiver(screenReceiver)
+
+        // FAILSAFE: Clear hardcore mode here as well using synchronous commit()
+        val prefs = getSharedPreferences("BedtimePrefs", Context.MODE_PRIVATE)
+        prefs.edit()
+            .putBoolean("hardcore_mode", false)
+            .putLong("hardcore_unlock_request_time", 0L)
+            .commit()
+    }
+
+    private fun isHardcoreLocked(): Boolean {
+        val prefs = getSharedPreferences("BedtimePrefs", Context.MODE_PRIVATE)
+        if (!prefs.getBoolean("hardcore_mode", false)) return false
+
+        val requestTime = prefs.getLong("hardcore_unlock_request_time", 0L)
+        if (requestTime == 0L) return true
+
+        var waitHours = prefs.getInt("hardcore_wait_hours", 3)
+        if (waitHours < 3) waitHours = 3
+
+        val unlockTime = requestTime + (waitHours * 3600000L)
+        return System.currentTimeMillis() < unlockTime
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -108,13 +173,23 @@ class AppBlockerService : AccessibilityService() {
 
         val packageName = event.packageName?.toString() ?: currentForegroundApp
 
-        val prefs = getSharedPreferences("BedtimePrefs", Context.MODE_PRIVATE)
-        if (prefs.getBoolean("hardcore_mode", false)) {
+        if (isHardcoreLocked()) {
             if (packageName == "com.android.settings" ||
                 packageName == "com.google.android.apps.wellbeing" ||
                 packageName == "com.google.android.packageinstaller") {
 
-                if (isAppMentionedOnScreen(rootInActiveWindow)) {
+                if (System.currentTimeMillis() < hardcoreBanEndTime) {
+                    triggerHomeBlock("Hardcore Lockout: Wait before trying again!", force = true)
+                    return
+                }
+
+                val eventText = event.text.toString().lowercase().replace(" ", "")
+                val contentDesc = event.contentDescription?.toString()?.lowercase()?.replace(" ", "") ?: ""
+
+                if (eventText.contains("socialblocker") || contentDesc.contains("socialblocker") ||
+                    eventText.contains("com.example.socialblocker") || isAppMentionedOnScreen(rootInActiveWindow)) {
+
+                    hardcoreBanEndTime = System.currentTimeMillis() + 5000L
                     triggerHomeBlock("Hardcore Mode: You cannot modify Social Blocker!", force = true)
                     return
                 }
@@ -123,8 +198,8 @@ class AppBlockerService : AccessibilityService() {
 
         if (packageName == null || isManualBypassActive) return
 
-        // --- POST-CALL PENALTY LOGIC ---
         if (isPostCallBypassActive) {
+            // Apply penalty if they open IG or YT specifically
             if (packageName == "com.google.android.youtube" || packageName == "com.instagram.android") {
                 isPostCallBypassActive = false
                 applyPenalty()
@@ -133,6 +208,7 @@ class AppBlockerService : AccessibilityService() {
             }
         }
 
+        // Keep Shorts/Reels block hardcoded since they rely on specific UI node IDs
         if (packageName == "com.google.android.youtube") {
             val root = rootInActiveWindow ?: return
             if (isYouTubeShorts(root)) blockShortContent("Shorts blocked")
@@ -145,16 +221,306 @@ class AppBlockerService : AccessibilityService() {
     private fun isAppMentionedOnScreen(node: AccessibilityNodeInfo?): Boolean {
         if (node == null) return false
 
-        // CRITICAL FIX: Strip all spaces! This catches "Social Blocker" AND "SocialBlocker"
         val text = node.text?.toString()?.lowercase()?.replace(" ", "") ?: ""
         val desc = node.contentDescription?.toString()?.lowercase()?.replace(" ", "") ?: ""
 
-        if (text.contains("socialblocker") || desc.contains("socialblocker")) return true
+        if (text.contains("socialblocker") || desc.contains("socialblocker") ||
+            text.contains("com.example.socialblocker") || desc.contains("com.example.socialblocker")) return true
 
         for (i in 0 until node.childCount) {
             if (isAppMentionedOnScreen(node.getChild(i))) return true
         }
         return false
+    }
+
+    // --- FEATURE 1: FLOATING TOP-RIGHT TIMER ---
+    private fun showFloatingTimer(remainingSeconds: Int) {
+        if (floatingTimerView == null) {
+            tvFloatingTimer = TextView(this).apply {
+                setTextColor(Color.WHITE)
+                textSize = 14f
+                setTypeface(Typeface.DEFAULT_BOLD)
+                setPadding(30, 15, 30, 15)
+                background = GradientDrawable().apply {
+                    cornerRadius = 40f
+                    setColor(Color.parseColor("#99000000")) // Semi-transparent black
+                }
+            }
+            val layout = FrameLayout(this).apply {
+                addView(tvFloatingTimer, FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    Gravity.TOP or Gravity.END
+                ).apply {
+                    setMargins(0, 120, 50, 0) // Keep away from status bar and edges
+                })
+            }
+            val params = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.TOP or Gravity.END
+            }
+            windowManager?.addView(layout, params)
+            floatingTimerView = layout
+        }
+
+        val m = remainingSeconds / 60
+        val s = remainingSeconds % 60
+        tvFloatingTimer?.text = String.format("%02d:%02d", m, s)
+
+        if (remainingSeconds < 60) {
+            tvFloatingTimer?.setTextColor(Color.parseColor("#FF453A")) // Red warning
+        } else {
+            tvFloatingTimer?.setTextColor(Color.WHITE)
+        }
+    }
+
+    private fun hideFloatingTimer() {
+        if (floatingTimerView != null) {
+            try { windowManager?.removeView(floatingTimerView) } catch (e: Exception) {}
+            floatingTimerView = null
+            tvFloatingTimer = null
+        }
+    }
+
+    // --- FEATURE 2: SAMSUNG STYLE RADIAL TIMER ---
+    inner class RadialTimerView(context: Context) : View(context) {
+        var progress = 1f
+        private val bgPaint = Paint().apply {
+            color = Color.parseColor("#1C1C1E")
+            style = Paint.Style.STROKE
+            strokeWidth = 40f // Made thicker to match Samsung style
+            isAntiAlias = true
+        }
+        private val progressPaint = Paint().apply {
+            color = Color.parseColor("#A3B5FF") // Light Blue matching Samsung
+            style = Paint.Style.STROKE
+            strokeWidth = 40f // Made thicker
+            strokeCap = Paint.Cap.ROUND
+            isAntiAlias = true
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val cx = width / 2f
+            val cy = height / 2f
+            // Adjust radius to account for the stroke width so it doesn't clip
+            val radius = Math.min(cx, cy) - (bgPaint.strokeWidth / 2f) - 5f
+
+            canvas.drawCircle(cx, cy, radius, bgPaint)
+            val sweepAngle = progress * 360f
+            val rectF = android.graphics.RectF(cx - radius, cy - radius, cx + radius, cy + radius)
+            canvas.drawArc(rectF, -90f, sweepAngle, false, progressPaint)
+        }
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    private fun showCooldownOverlay(appName: String, remainingMs: Long, totalMs: Long, endTimeMs: Long) {
+        if (cooldownOverlayView == null) {
+            val layout = FrameLayout(this)
+            layout.setBackgroundColor(Color.BLACK)
+            layout.isClickable = true
+            layout.isFocusable = true
+
+            try {
+                val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                if (preMuteVolume == -1) preMuteVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, 0, 0)
+            } catch (e: Exception) {}
+
+            val centerContainer = FrameLayout(this)
+
+            val screenWidth = resources.displayMetrics.widthPixels
+            val ringSize = (screenWidth * 0.85).toInt()
+
+            radialTimerView = RadialTimerView(this)
+            centerContainer.addView(radialTimerView, FrameLayout.LayoutParams(ringSize, ringSize, Gravity.CENTER))
+
+            val textContainer = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                layoutParams = FrameLayout.LayoutParams(ringSize, ringSize, Gravity.CENTER)
+            }
+
+            textContainer.addView(TextView(this).apply {
+                text = "$appName Blocked"
+                setTextColor(Color.parseColor("#888888"))
+                textSize = 16f
+                gravity = Gravity.CENTER_HORIZONTAL
+                setPadding(0, 0, 0, 30)
+            })
+
+            tvCooldownDigital = TextView(this).apply {
+                setTextColor(Color.WHITE)
+                textSize = 72f
+                setTypeface(Typeface.create("sans-serif", Typeface.NORMAL))
+                gravity = Gravity.CENTER_HORIZONTAL
+            }
+            textContainer.addView(tvCooldownDigital)
+
+            tvCooldownEnd = TextView(this).apply {
+                setTextColor(Color.parseColor("#AAAAAA"))
+                textSize = 16f
+                gravity = Gravity.CENTER_HORIZONTAL
+                setPadding(0, 30, 0, 0)
+            }
+            textContainer.addView(tvCooldownEnd)
+
+            centerContainer.addView(textContainer)
+
+            layout.addView(centerContainer)
+
+            val btnHome = Button(this).apply {
+                text = "Go Home"
+                setTextColor(Color.WHITE)
+                isAllCaps = false
+                textSize = 16f
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#E04040"))
+                    cornerRadius = 100f
+                }
+                setPadding(120, 50, 120, 50)
+                setOnClickListener { performGlobalAction(GLOBAL_ACTION_HOME) }
+            }
+
+            layout.addView(btnHome, FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            ).apply { setMargins(0, 0, 0, 200) })
+
+            val params = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                PixelFormat.OPAQUE
+            )
+            windowManager?.addView(layout, params)
+            cooldownOverlayView = layout
+        }
+
+        radialTimerView?.progress = (remainingMs.toFloat() / totalMs.toFloat()).coerceIn(0f, 1f)
+        radialTimerView?.invalidate()
+
+        val totalSec = remainingMs / 1000
+        val h = totalSec / 3600
+        val m = (totalSec % 3600) / 60
+        val s = totalSec % 60
+        if (h > 0) {
+            tvCooldownDigital?.text = String.format("%d:%02d:%02d", h, m, s)
+        } else {
+            tvCooldownDigital?.text = String.format("%02d:%02d", m, s)
+        }
+
+        val cal = Calendar.getInstance().apply { timeInMillis = endTimeMs }
+        val endH = cal.get(Calendar.HOUR)
+        val dispH = if (endH == 0) 12 else endH
+        val endM = cal.get(Calendar.MINUTE)
+        val amPm = if (cal.get(Calendar.AM_PM) == Calendar.AM) "AM" else "PM"
+        tvCooldownEnd?.text = String.format("🔔 %d:%02d %s", dispH, endM, amPm)
+    }
+
+    private fun hideCooldownOverlay() {
+        if (cooldownOverlayView != null) {
+            try { windowManager?.removeView(cooldownOverlayView) } catch (e: Exception) {}
+            cooldownOverlayView = null
+            radialTimerView = null
+            tvCooldownDigital = null
+            tvCooldownEnd = null
+
+            try {
+                val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                if (preMuteVolume != -1) {
+                    audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, preMuteVolume, 0)
+                    preMuteVolume = -1
+                }
+            } catch (e: Exception) {}
+        }
+    }
+
+    // --- HELPER: Fetch App Name from Package ---
+    private fun getAppName(packageName: String): String {
+        return try {
+            val pm = packageManager
+            val info = pm.getApplicationInfo(packageName, 0)
+            pm.getApplicationLabel(info).toString()
+        } catch (e: Exception) {
+            packageName
+        }
+    }
+
+    // --- FEATURE 3: DYNAMIC APP CHECKER ---
+    private fun checkAppTimers(shouldIncrementUsage: Boolean) {
+        val activePkg = rootInActiveWindow?.packageName?.toString() ?: currentForegroundApp
+        val prefs = getSharedPreferences("AppTimerPrefs", Context.MODE_PRIVATE)
+        val now = System.currentTimeMillis()
+
+        // Fetch dynamic list of tracked packages (defaults to IG and YT to keep existing functionality)
+        val trackedApps = prefs.getStringSet("tracked_packages", setOf("com.instagram.android", "com.google.android.youtube")) ?: setOf()
+
+        var isTrackedAppForeground = false
+
+        if (activePkg != null && trackedApps.contains(activePkg)) {
+            isTrackedAppForeground = true
+            val appName = getAppName(activePkg)
+
+            // Maintain backward compatibility for keys "ig" and "yt", otherwise use package name as the prefix key
+            val prefix = when (activePkg) {
+                "com.instagram.android" -> "ig"
+                "com.google.android.youtube" -> "yt"
+                else -> activePkg.replace(".", "_")
+            }
+
+            handleAppTimer(prefix, appName, prefs, now, shouldIncrementUsage)
+        }
+
+        if (!isTrackedAppForeground) {
+            hideFloatingTimer()
+            hideCooldownOverlay()
+        }
+    }
+
+    private fun handleAppTimer(prefix: String, appName: String, prefs: SharedPreferences, now: Long, shouldIncrementUsage: Boolean) {
+        val cooldownStart = prefs.getLong("${prefix}_cooldown_start", 0L)
+        val storedCooldownHours = prefs.getInt("${prefix}_cooldown_hours", 1)
+        val actualCooldownHours = if (storedCooldownHours < 1) 1 else storedCooldownHours
+        val cooldownDurationMs = actualCooldownHours * 3600000L
+        val limitSeconds = prefs.getInt("${prefix}_limit_mins", 10) * 60
+
+        if (cooldownStart > 0) {
+            hideFloatingTimer()
+            val endTimeMs = cooldownStart + cooldownDurationMs
+            val remainingMs = endTimeMs - now
+
+            if (remainingMs > 0) {
+                showCooldownOverlay(appName, remainingMs, cooldownDurationMs, endTimeMs)
+            } else {
+                prefs.edit().putLong("${prefix}_cooldown_start", 0L).putInt("${prefix}_usage_seconds", 0).apply()
+                hideCooldownOverlay()
+            }
+        } else {
+            hideCooldownOverlay()
+
+            var usage = prefs.getInt("${prefix}_usage_seconds", 0)
+            if (shouldIncrementUsage) {
+                usage++
+                prefs.edit().putInt("${prefix}_usage_seconds", usage).apply()
+            }
+
+            val remainingSeconds = limitSeconds - usage
+            if (remainingSeconds <= 0) {
+                prefs.edit().putLong("${prefix}_cooldown_start", now).apply()
+                hideFloatingTimer()
+                showCooldownOverlay(appName, cooldownDurationMs, cooldownDurationMs, now + cooldownDurationMs)
+            } else {
+                showFloatingTimer(remainingSeconds)
+            }
+        }
     }
 
     private fun blockShortContent(message: String) {
@@ -224,40 +590,6 @@ class AppBlockerService : AccessibilityService() {
         }
     }
 
-    private fun checkAppTimers() {
-        val activePkg = rootInActiveWindow?.packageName?.toString() ?: currentForegroundApp ?: return
-        val prefs = getSharedPreferences("AppTimerPrefs", Context.MODE_PRIVATE)
-        val now = System.currentTimeMillis()
-
-        if (activePkg == "com.instagram.android") handleAppTimer("ig", "Instagram", prefs, now)
-        else if (activePkg == "com.google.android.youtube") handleAppTimer("yt", "YouTube", prefs, now)
-    }
-
-    private fun handleAppTimer(prefix: String, appName: String, prefs: SharedPreferences, now: Long) {
-        val cooldownStart = prefs.getLong("${prefix}_cooldown_start", 0L)
-        val storedCooldownHours = prefs.getInt("${prefix}_cooldown_hours", 1)
-        val actualCooldownHours = if (storedCooldownHours < 1) 1 else storedCooldownHours
-        val cooldownDurationMs = actualCooldownHours * 3600000L
-        val limitSeconds = prefs.getInt("${prefix}_limit_mins", 10) * 60
-
-        if (cooldownStart > 0) {
-            if (now < cooldownStart + cooldownDurationMs) {
-                triggerHomeBlock("$appName is on Cooldown limit!", force = true)
-            } else {
-                prefs.edit().putLong("${prefix}_cooldown_start", 0L).putInt("${prefix}_usage_seconds", 0).apply()
-            }
-        } else {
-            var usage = prefs.getInt("${prefix}_usage_seconds", 0)
-            usage++
-            prefs.edit().putInt("${prefix}_usage_seconds", usage).apply()
-
-            if (usage >= limitSeconds) {
-                prefs.edit().putLong("${prefix}_cooldown_start", now).apply()
-                triggerHomeBlock("Daily limit reached! $appName Cooldown started.", force = true)
-            }
-        }
-    }
-
     private fun getRemainingBypasses(): Int {
         val prefs = getSharedPreferences("BypassPrefs", Context.MODE_PRIVATE)
         val currentWeek = Calendar.getInstance().get(Calendar.WEEK_OF_YEAR)
@@ -271,7 +603,6 @@ class AppBlockerService : AccessibilityService() {
         return Math.max(0, totalAllowed - used)
     }
 
-    // --- FULL SCREEN BEDTIME OVERLAY ---
     @SuppressLint("ClickableViewAccessibility")
     private fun showBedtimeOverlay() {
         if (overlayView != null) return
@@ -364,7 +695,6 @@ class AppBlockerService : AccessibilityService() {
         }
     }
 
-    // --- PENALTY EXECUTION (-1) ---
     private fun applyPenalty() {
         val prefs = getSharedPreferences("BypassPrefs", Context.MODE_PRIVATE)
         val currentWeek = Calendar.getInstance().get(Calendar.WEEK_OF_YEAR)
@@ -373,7 +703,7 @@ class AppBlockerService : AccessibilityService() {
         var used = if (currentWeek == lastBypassWeek) prefs.getInt("used_this_week", 0) else 0
 
         prefs.edit()
-            .putInt("used_this_week", used + 1) // Minus 1 Bypass (by adding 1 to 'used')
+            .putInt("used_this_week", used + 1)
             .putInt("last_bypass_week", currentWeek)
             .apply()
     }
@@ -382,8 +712,14 @@ class AppBlockerService : AccessibilityService() {
         val currentTime = System.currentTimeMillis()
         if (force || currentTime - lastBlockTime > blockCooldownMs) {
             lastBlockTime = currentTime
+
+            showShortsOverlay(message)
             showToast(message)
             performGlobalAction(GLOBAL_ACTION_HOME)
+
+            Handler(Looper.getMainLooper()).postDelayed({
+                hideShortsOverlay()
+            }, 1500)
         }
     }
 
@@ -417,5 +753,7 @@ class AppBlockerService : AccessibilityService() {
         return if (sM < eM) curM in sM until eM else curM >= sM || curM < eM
     }
 
-    override fun onInterrupt() {}
+    override fun onInterrupt() {
+        // Required method by AccessibilityService. We do not need to perform any action when interrupted.
+    }
 }

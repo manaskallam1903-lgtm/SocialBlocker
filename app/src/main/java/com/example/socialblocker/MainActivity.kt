@@ -2,15 +2,16 @@ package com.example.socialblocker
 
 import android.Manifest
 import android.annotation.SuppressLint
-import android.app.Activity
 import android.app.AlertDialog
 import android.app.TimePickerDialog
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
@@ -20,12 +21,14 @@ import android.provider.ContactsContract
 import android.provider.Settings
 import android.text.Editable
 import android.text.InputType
+import android.text.TextUtils
 import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -45,13 +48,19 @@ class MainActivity : AppCompatActivity() {
     private var subtitleTextColor = Color.GRAY
     private var buttonBgColor = Color.LTGRAY
     private var buttonTextColor = Color.BLACK
+    private var cardBgColor = Color.WHITE
+    private var strokeColor = Color.LTGRAY
 
-    // Reference for updating the UI after picking a contact
+    // Reference for updating UI
     private lateinit var tvEmergencyContact: TextView
+    private lateinit var appsContainerLayout: LinearLayout
     private var isContactPickerOpen = false
+    private var isAppPickerOpen = false
 
-    // Data class for the custom contact picker
+    // Data classes
     data class ContactItem(val name: String, val number: String, var isChecked: Boolean)
+    // ADDED: Drawable icon field to store the app's visual icon
+    data class AppItem(val name: String, val packageName: String, val icon: Drawable?, var isChecked: Boolean)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -59,8 +68,8 @@ class MainActivity : AppCompatActivity() {
         // --- PREMIUM MINIMALIST THEME COLORS ---
         isDarkMode = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
         val bgColor = if (isDarkMode) Color.parseColor("#000000") else Color.parseColor("#F2F2F7")
-        val cardBgColor = if (isDarkMode) Color.parseColor("#121212") else Color.WHITE
-        val strokeColor = if (isDarkMode) Color.parseColor("#2A2A2A") else Color.parseColor("#E5E5EA")
+        cardBgColor = if (isDarkMode) Color.parseColor("#121212") else Color.WHITE
+        strokeColor = if (isDarkMode) Color.parseColor("#2A2A2A") else Color.parseColor("#E5E5EA")
 
         mainTextColor = if (isDarkMode) Color.WHITE else Color.BLACK
         subtitleTextColor = if (isDarkMode) Color.parseColor("#8E8E93") else Color.parseColor("#636366")
@@ -76,7 +85,7 @@ class MainActivity : AppCompatActivity() {
             layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         }
 
-        // --- ONE UI STYLE HEADER ---
+        // --- HEADER ---
         val headerLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(60, 180, 60, 40)
@@ -107,12 +116,10 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, 0, 0, 120)
         }
 
-        // --- 0. APP GUIDE / INFO SECTION ---
+        // --- 0. APP GUIDE ---
         addSectionHeader(contentLayout, "App Guide")
         val infoCard = createCardLayout(cardBgColor, strokeColor)
-        addButtonToCard(infoCard, "How to Use This App", buttonBgColor, buttonTextColor) {
-            showInfoDialog()
-        }
+        addButtonToCard(infoCard, "How to Use This App", buttonBgColor, buttonTextColor) { showInfoDialog() }
         contentLayout.addView(infoCard)
 
         // --- 1. BEDTIME SECTION ---
@@ -121,19 +128,29 @@ class MainActivity : AppCompatActivity() {
         setupBedtimeUI(bedtimeCard, mainTextColor, buttonBgColor, buttonTextColor)
         contentLayout.addView(bedtimeCard)
 
-        // --- 2. INSTAGRAM LIMITS ---
-        addSectionHeader(contentLayout, "Instagram Restrictions")
-        val igCard = createCardLayout(cardBgColor, strokeColor)
-        setupAppTimerUI(igCard, "ig", mainTextColor, buttonBgColor, buttonTextColor)
-        contentLayout.addView(igCard)
+        // --- 2. DYNAMIC APP RESTRICTIONS ---
+        addSectionHeader(contentLayout, "App Restrictions")
+        val manageAppsCard = createCardLayout(cardBgColor, strokeColor)
+        addButtonToCard(manageAppsCard, "Select Apps to Restrict", buttonBgColor, buttonTextColor) {
+            if (isAppLocked()) {
+                Toast.makeText(this, "Settings locked by Hardcore Mode! Request an unlock first.", Toast.LENGTH_LONG).show()
+                return@addButtonToCard
+            }
+            showDynamicAppPicker()
+        }
+        contentLayout.addView(manageAppsCard)
 
-        // --- 3. YOUTUBE LIMITS ---
-        addSectionHeader(contentLayout, "YouTube Restrictions")
-        val ytCard = createCardLayout(cardBgColor, strokeColor)
-        setupAppTimerUI(ytCard, "yt", mainTextColor, buttonBgColor, buttonTextColor)
-        contentLayout.addView(ytCard)
+        // Container for the dynamic app cards
+        appsContainerLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        }
+        contentLayout.addView(appsContainerLayout)
 
-        // --- 4. BYPASS SETTINGS ---
+        // Render currently tracked apps immediately
+        renderDynamicAppCards()
+
+        // --- 3. EMERGENCY ACCESS ---
         addSectionHeader(contentLayout, "Emergency Access")
         val bypassCard = createCardLayout(cardBgColor, strokeColor)
 
@@ -149,32 +166,22 @@ class MainActivity : AppCompatActivity() {
 
         addButtonToCard(bypassCard, "Manage Emergency Contacts", buttonBgColor, buttonTextColor) {
             if (isAppLocked()) {
-                Toast.makeText(this, "Settings locked by Hardcore Mode! Request an unlock first.", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "Settings locked by Hardcore Mode!", Toast.LENGTH_LONG).show()
                 return@addButtonToCard
             }
-
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED) {
                 showMultiContactPicker()
             } else {
                 Toast.makeText(this, "Please grant System Permissions below first!", Toast.LENGTH_LONG).show()
             }
         }
-
         addButtonToCard(bypassCard, "Clear Contacts", buttonBgColor, buttonTextColor) {
-            if (isAppLocked()) {
-                Toast.makeText(this, "Settings locked by Hardcore Mode! Request an unlock first.", Toast.LENGTH_LONG).show()
-                return@addButtonToCard
-            }
-
+            if (isAppLocked()) return@addButtonToCard
             getSharedPreferences("BypassPrefs", Context.MODE_PRIVATE).edit()
-                .putString("emergency_numbers", "")
-                .putString("emergency_names", "")
-                .apply()
-
+                .putString("emergency_numbers", "").putString("emergency_names", "").apply()
             updateEmergencyContactsUI()
-            Toast.makeText(this, "Emergency contacts cleared!", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Cleared!", Toast.LENGTH_SHORT).show()
         }
-
         addButtonToCard(bypassCard, "Change Weekly Limit", buttonBgColor, buttonTextColor) {
             showNumberDialog("Weekly Bypasses", "BypassPrefs", "weekly_limit", 1, minVal = 1, maxVal = 3) { _ ->
                 val (left, total) = getBypassInfo()
@@ -183,29 +190,24 @@ class MainActivity : AppCompatActivity() {
         }
         contentLayout.addView(bypassCard)
 
-        // --- 5. HARDCORE PROTECTION ---
+        // --- 4. HARDCORE PROTECTION ---
         addSectionHeader(contentLayout, "Hardcore Protection")
         val protectionCard = createCardLayout(cardBgColor, strokeColor)
         setupProtectionUI(protectionCard, mainTextColor, subtitleTextColor, buttonBgColor, buttonTextColor)
         contentLayout.addView(protectionCard)
 
-        // --- 6. PERMISSIONS ---
+        // --- 5. PERMISSIONS ---
         addSectionHeader(contentLayout, "System Configuration")
         val permissionsCard = createCardLayout(cardBgColor, strokeColor)
         addButtonToCard(permissionsCard, "1. Enable Accessibility", buttonBgColor, buttonTextColor) {
-            // CRITICAL FIX: Block the shortcut button during Hardcore Mode
             if (isAppLocked()) {
-                Toast.makeText(this, "Settings locked by Hardcore Mode! Request an unlock first.", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "Settings locked by Hardcore Mode!", Toast.LENGTH_LONG).show()
                 return@addButtonToCard
             }
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         }
-        addButtonToCard(permissionsCard, "2. System Permissions", buttonBgColor, buttonTextColor) {
-            requestStandardPermissions()
-        }
-        addButtonToCard(permissionsCard, "3. Ignore Battery Optimization", buttonBgColor, buttonTextColor) {
-            requestIgnoreBatteryOptimizations()
-        }
+        addButtonToCard(permissionsCard, "2. System Permissions", buttonBgColor, buttonTextColor) { requestStandardPermissions() }
+        addButtonToCard(permissionsCard, "3. Ignore Battery Optimization", buttonBgColor, buttonTextColor) { requestIgnoreBatteryOptimizations() }
         contentLayout.addView(permissionsCard)
 
         val scrollView = ScrollView(this).apply {
@@ -218,6 +220,263 @@ class MainActivity : AppCompatActivity() {
 
         setContentView(rootLayout)
     }
+
+    // --- NEW: Refresh UI instantly if returning from Settings with Accessibility Revoked ---
+    override fun onResume() {
+        super.onResume()
+        val prefs = getSharedPreferences("BedtimePrefs", Context.MODE_PRIVATE)
+        val isHardcore = prefs.getBoolean("hardcore_mode", false)
+        val isPendingHardcore = prefs.getBoolean("pending_hardcore", false)
+
+        val isAccEnabled = isAccessibilityServiceEnabled(this)
+
+        if (!isAccEnabled) {
+            // Remind them every time they open the app if the permission isn't granted
+            Toast.makeText(this, "Reminder: Accessibility Service is not enabled!", Toast.LENGTH_LONG).show()
+
+            if (isHardcore) {
+                prefs.edit()
+                    .putBoolean("hardcore_mode", false)
+                    .putLong("hardcore_unlock_request_time", 0L)
+                    .commit()
+                // Recreate the activity to forcefully refresh all UI cards and buttons
+                recreate()
+            }
+            if (isPendingHardcore) {
+                prefs.edit().putBoolean("pending_hardcore", false).commit()
+            }
+        } else {
+            // If they just granted the permission for a pending Hardcore mode request
+            if (isPendingHardcore) {
+                prefs.edit()
+                    .putBoolean("hardcore_mode", true)
+                    .putLong("hardcore_unlock_request_time", 0L)
+                    .putBoolean("pending_hardcore", false)
+                    .commit()
+                Toast.makeText(this, "Accessibility Enabled! Hardcore Mode Activated.", Toast.LENGTH_LONG).show()
+                recreate()
+            }
+        }
+    }
+
+    // --- DYNAMIC APP UI LOGIC ---
+    private fun renderDynamicAppCards() {
+        appsContainerLayout.removeAllViews()
+        val prefs = getSharedPreferences("AppTimerPrefs", Context.MODE_PRIVATE)
+        val trackedApps = prefs.getStringSet("tracked_packages", setOf("com.instagram.android", "com.google.android.youtube")) ?: setOf()
+
+        for (pkg in trackedApps) {
+            val appName = getAppName(pkg)
+
+            // Map old prefixes for backwards compatibility
+            val prefix = when (pkg) {
+                "com.instagram.android" -> "ig"
+                "com.google.android.youtube" -> "yt"
+                else -> pkg.replace(".", "_")
+            }
+
+            addSectionHeader(appsContainerLayout, "$appName Limits")
+            val card = createCardLayout(cardBgColor, strokeColor)
+            setupDynamicAppTimerUI(card, prefix, appName, mainTextColor, buttonBgColor, buttonTextColor)
+            appsContainerLayout.addView(card)
+        }
+    }
+
+    private fun setupDynamicAppTimerUI(layout: LinearLayout, prefix: String, appName: String, textColor: Int, btnBg: Int, btnText: Int) {
+        val prefs = getSharedPreferences("AppTimerPrefs", Context.MODE_PRIVATE)
+
+        val tvStats = TextView(this).apply {
+            textSize = 15f
+            setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL))
+            setTextColor(textColor)
+            gravity = Gravity.CENTER
+            setPadding(0, 20, 0, 30)
+        }
+
+        fun updateStats() {
+            val limitMins = prefs.getInt("${prefix}_limit_mins", 10)
+            val cooldownHours = prefs.getInt("${prefix}_cooldown_hours", 1)
+            tvStats.text = "Daily Limit: $limitMins Mins\nCooldown: $cooldownHours Hour(s)"
+        }
+        updateStats()
+
+        layout.addView(tvStats)
+        addButtonToCard(layout, "Set Limit (Mins)", btnBg, btnText) {
+            showNumberDialog("$appName Daily Limit (Mins)", "AppTimerPrefs", "${prefix}_limit_mins", 10) { updateStats() }
+        }
+        addButtonToCard(layout, "Set Cooldown (Hours)", btnBg, btnText) {
+            showNumberDialog("$appName Cooldown (Hours)", "AppTimerPrefs", "${prefix}_cooldown_hours", 1) { updateStats() }
+        }
+    }
+
+    private fun getAppName(packageName: String): String {
+        return try {
+            val pm = packageManager
+            val info = pm.getApplicationInfo(packageName, 0)
+            pm.getApplicationLabel(info).toString()
+        } catch (e: Exception) {
+            packageName
+        }
+    }
+
+    // --- CUSTOM APP PICKER ---
+    @SuppressLint("InflateParams")
+    private fun showDynamicAppPicker() {
+        if (isAppPickerOpen) return
+        isAppPickerOpen = true
+
+        Toast.makeText(this, "Loading installed apps...", Toast.LENGTH_SHORT).show()
+
+        Thread {
+            val appList = mutableListOf<AppItem>()
+            val pm = packageManager
+            val intent = Intent(Intent.ACTION_MAIN, null).apply { addCategory(Intent.CATEGORY_LAUNCHER) }
+            val apps = pm.queryIntentActivities(intent, PackageManager.GET_META_DATA)
+
+            for (resolveInfo in apps) {
+                val pkgName = resolveInfo.activityInfo.packageName
+                if (pkgName != packageName) { // Exclude Social Blocker itself
+                    val name = resolveInfo.loadLabel(pm).toString()
+                    val icon = resolveInfo.loadIcon(pm) // Grab the actual high-res icon
+
+                    // Check for duplicates
+                    if (!appList.any { it.packageName == pkgName }) {
+                        appList.add(AppItem(name, pkgName, icon, false))
+                    }
+                }
+            }
+            appList.sortBy { it.name.lowercase() }
+
+            runOnUiThread {
+                val prefs = getSharedPreferences("AppTimerPrefs", Context.MODE_PRIVATE)
+                val trackedApps = prefs.getStringSet("tracked_packages", setOf("com.instagram.android", "com.google.android.youtube")) ?: setOf()
+
+                appList.forEach { if (trackedApps.contains(it.packageName)) it.isChecked = true }
+
+                val dialogContainer = LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(40, 50, 40, 20)
+                }
+
+                val searchInput = EditText(this@MainActivity).apply {
+                    hint = "Search apps..."
+                    setHintTextColor(subtitleTextColor)
+                    setTextColor(mainTextColor)
+                    inputType = InputType.TYPE_CLASS_TEXT
+                    setPadding(40, 35, 40, 35)
+                    background = GradientDrawable().apply {
+                        cornerRadius = 40f
+                        setColor(if (isDarkMode) Color.parseColor("#1C1C1E") else Color.parseColor("#E5E5EA"))
+                    }
+                    layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                        setMargins(0, 0, 0, 30)
+                    }
+                }
+                dialogContainer.addView(searchInput)
+
+                val listContainer = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+                val scrollView = ScrollView(this@MainActivity).apply {
+                    layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 800)
+                    addView(listContainer)
+                }
+                dialogContainer.addView(scrollView)
+
+                fun renderApps(query: String) {
+                    listContainer.removeAllViews()
+                    val filtered = appList.filter {
+                        it.name.contains(query, ignoreCase = true) || it.packageName.contains(query, ignoreCase = true)
+                    }
+
+                    if (filtered.isEmpty()) {
+                        listContainer.addView(TextView(this@MainActivity).apply {
+                            text = "No apps found. (Did you add QUERY_ALL_PACKAGES to Manifest?)"
+                            setTextColor(subtitleTextColor)
+                            setPadding(20, 40, 20, 40)
+                            gravity = Gravity.CENTER
+                        })
+                        return
+                    }
+
+                    for (app in filtered) {
+                        val row = LinearLayout(this@MainActivity).apply {
+                            orientation = LinearLayout.HORIZONTAL
+                            setPadding(30, 40, 30, 40)
+                            gravity = Gravity.CENTER_VERTICAL
+                            isClickable = true
+
+                            // Inject the ImageView into the UI for the App Icon
+                            val iconView = ImageView(this@MainActivity).apply {
+                                setImageDrawable(app.icon)
+                                layoutParams = LinearLayout.LayoutParams(110, 110).apply {
+                                    setMargins(0, 0, 40, 0)
+                                }
+                            }
+                            addView(iconView)
+
+                            val nameText = TextView(this@MainActivity).apply {
+                                text = "${app.name}\n"
+                                append(android.text.SpannableString(app.packageName).apply {
+                                    setSpan(android.text.style.RelativeSizeSpan(0.8f), 0, length, 0)
+                                    setSpan(android.text.style.ForegroundColorSpan(subtitleTextColor), 0, length, 0)
+                                })
+                                setTextColor(if (app.isChecked) Color.parseColor("#A3B5FF") else mainTextColor)
+                                textSize = 15f
+                                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                            }
+
+                            val checkText = TextView(this@MainActivity).apply {
+                                text = if (app.isChecked) "✓" else ""
+                                setTextColor(Color.parseColor("#A3B5FF"))
+                                textSize = 20f
+                                setTypeface(null, Typeface.BOLD)
+                            }
+
+                            addView(nameText)
+                            addView(checkText)
+
+                            setOnClickListener {
+                                app.isChecked = !app.isChecked
+                                nameText.setTextColor(if (app.isChecked) Color.parseColor("#A3B5FF") else mainTextColor)
+                                checkText.text = if (app.isChecked) "✓" else ""
+                            }
+                        }
+                        listContainer.addView(row)
+                    }
+                }
+
+                renderApps("")
+
+                searchInput.addTextChangedListener(object : TextWatcher {
+                    override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { renderApps(s.toString()) }
+                    override fun afterTextChanged(s: Editable?) {}
+                })
+
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Select Apps to Restrict")
+                    .setView(dialogContainer)
+                    .setPositiveButton("Save") { _, _ ->
+                        val newTrackedSet = mutableSetOf<String>()
+                        for (app in appList) {
+                            if (app.isChecked) newTrackedSet.add(app.packageName)
+                        }
+
+                        // Save tracked packages
+                        prefs.edit().putStringSet("tracked_packages", newTrackedSet).apply()
+
+                        // Dynamically refresh the UI with new cards
+                        renderDynamicAppCards()
+
+                        Toast.makeText(this@MainActivity, "App restrictions updated!", Toast.LENGTH_SHORT).show()
+                        isAppPickerOpen = false
+                    }
+                    .setNegativeButton("Cancel") { _, _ -> isAppPickerOpen = false }
+                    .setOnCancelListener { isAppPickerOpen = false }
+                    .show()
+            }
+        }.start()
+    }
+
 
     // --- MULTIPLE CONTACTS UI HELPER ---
     private fun updateEmergencyContactsUI() {
@@ -260,15 +519,11 @@ class MainActivity : AppCompatActivity() {
 
         Thread {
             val contactList = mutableListOf<ContactItem>()
-            val projection = arrayOf(
-                ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
-                ContactsContract.CommonDataKinds.Phone.NUMBER
-            )
+            val projection = arrayOf(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME, ContactsContract.CommonDataKinds.Phone.NUMBER)
 
             try {
                 contentResolver.query(
-                    ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
-                    projection, null, null,
+                    ContactsContract.CommonDataKinds.Phone.CONTENT_URI, projection, null, null,
                     "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} ASC"
                 )?.use { cursor ->
                     val nameIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
@@ -355,14 +610,14 @@ class MainActivity : AppCompatActivity() {
 
                             val nameText = TextView(this@MainActivity).apply {
                                 text = "${contact.name}\n${contact.number}"
-                                setTextColor(if (contact.isChecked) Color.parseColor("#32D74B") else mainTextColor)
+                                setTextColor(if (contact.isChecked) Color.parseColor("#A3B5FF") else mainTextColor)
                                 textSize = 15f
                                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
                             }
 
                             val checkText = TextView(this@MainActivity).apply {
                                 text = if (contact.isChecked) "✓" else ""
-                                setTextColor(Color.parseColor("#32D74B"))
+                                setTextColor(Color.parseColor("#A3B5FF"))
                                 textSize = 20f
                                 setTypeface(null, Typeface.BOLD)
                             }
@@ -372,7 +627,7 @@ class MainActivity : AppCompatActivity() {
 
                             setOnClickListener {
                                 contact.isChecked = !contact.isChecked
-                                nameText.setTextColor(if (contact.isChecked) Color.parseColor("#32D74B") else mainTextColor)
+                                nameText.setTextColor(if (contact.isChecked) Color.parseColor("#A3B5FF") else mainTextColor)
                                 checkText.text = if (contact.isChecked) "✓" else ""
                             }
                         }
@@ -415,14 +670,22 @@ class MainActivity : AppCompatActivity() {
         }.start()
     }
 
-    // --- GLOBAL HARDCORE LOCK CHECK ---
     private fun isAppLocked(): Boolean {
         val prefs = getSharedPreferences("BedtimePrefs", Context.MODE_PRIVATE)
         val isHardcore = prefs.getBoolean("hardcore_mode", false)
+
+        // FAILSAFE: Automatically unlock if accessibility permission is missing
+        if (isHardcore && !isAccessibilityServiceEnabled(this)) {
+            prefs.edit()
+                .putBoolean("hardcore_mode", false)
+                .putLong("hardcore_unlock_request_time", 0L)
+                .commit()
+            return false
+        }
+
         if (!isHardcore) return false
 
         val requestTime = prefs.getLong("hardcore_unlock_request_time", 0L)
-
         var waitHours = prefs.getInt("hardcore_wait_hours", 3)
         if (waitHours < 3) waitHours = 3
 
@@ -432,7 +695,6 @@ class MainActivity : AppCompatActivity() {
         return System.currentTimeMillis() < unlockTime
     }
 
-    // --- PREMIUM UI HELPER FUNCTIONS ---
     private fun addSectionHeader(layout: LinearLayout, title: String) {
         layout.addView(TextView(this).apply {
             text = title.uppercase()
@@ -483,30 +745,29 @@ class MainActivity : AppCompatActivity() {
         return btn
     }
 
-    // --- APP GUIDE DIALOG ---
     private fun showInfoDialog() {
         val builder = AlertDialog.Builder(this)
         builder.setTitle("App Guide & Warnings")
 
         val message = """
-            Welcome to Social Blocker! Here is how to use the app safely:
+            Welcome to Social Blocker!
             
             🛌 BEDTIME MODE
-            Blacks out your screen completely during your set sleep hours.
+            Blacks out your screen completely during sleep hours.
             
-            ⏳ APP LIMITS & SHORTS
-            Instagram Reels and YouTube Shorts are blocked instantly. Normal scrolling is tracked. Once your daily limit is reached, a strict cooldown begins.
+            ⏳ DYNAMIC APP RESTRICTIONS & TIMERS
+            Use "Select Apps to Restrict" to choose any app to limit. 
+            • A floating timer will appear in the top-right corner to show your remaining daily time.
+            • Once your limit is reached, a full-screen radial cooldown timer will block the app until the cooldown period ends!
+            • Note: Instagram Reels & YouTube Shorts are ALWAYS blocked instantly.
             
-            🛡️ HARDCORE PROTECTION (WARNING)
-            This actively blocks your phone's Settings and prevents uninstallation so you cannot cheat the app.
+            🛡️ HARDCORE PROTECTION
+            Actively blocks your phone's Settings so you cannot cheat or uninstall the app.
             
-            🔑 EMERGENCY BYPASSES
-            Hold the bottom center of the black screen for 3 seconds to activate a 1-hour emergency bypass.
-            
-            📞 EMERGENCY CALLS & PENALTY
-            If a saved Emergency Contact calls, or ANY number calls twice in 10 minutes, Bedtime Mode unlocks. 
-            After the call, you get a 15-minute free temporary bypass. This ends early if you lock your screen!
-            ⚠️ PENALTY: If you dare open Instagram or YouTube during this post-call bypass, Bedtime Mode instantly reactivates and you LOSE 1 weekly bypass!
+            🔑 BYPASSES & PENALTIES
+            Hold the bottom center of the black screen for 3s to get a 1-hour bypass. 
+            If a saved Emergency Contact calls, you get a 15-minute free bypass after the call. 
+            ⚠️ PENALTY: Opening social media during this post-call bypass instantly ends it and costs 1 weekly bypass!
         """.trimIndent()
 
         val tvMessage = TextView(this).apply {
@@ -523,7 +784,6 @@ class MainActivity : AppCompatActivity() {
         builder.show()
     }
 
-    // --- HARDCORE PROTECTION UI LOGIC ---
     private fun setupProtectionUI(layout: LinearLayout, textColor: Int, subColor: Int, btnBg: Int, btnText: Int) {
         val prefs = getSharedPreferences("BedtimePrefs", Context.MODE_PRIVATE)
 
@@ -610,10 +870,17 @@ class MainActivity : AppCompatActivity() {
                         .setMessage("This will block your phone's Settings and prevent uninstallation. If you want to disable it later, you must wait a MINIMUM of 3 HOURS after requesting an unlock. Are you absolutely sure?")
                         .setPositiveButton("I Understand") { _, _ ->
                             showNumberDialog("Set Unlock Wait Time (Hours)", "BedtimePrefs", "hardcore_wait_hours", 3, minVal = 3) { _ ->
-                                prefs.edit().putBoolean("hardcore_mode", true)
-                                    .putLong("hardcore_unlock_request_time", 0L).apply()
-                                Toast.makeText(this, "Hardcore Mode Activated!", Toast.LENGTH_SHORT).show()
-                                updateUI()
+                                if (!isAccessibilityServiceEnabled(this@MainActivity)) {
+                                    // If permission is missing, save pending flag and redirect to settings
+                                    prefs.edit().putBoolean("pending_hardcore", true).apply()
+                                    Toast.makeText(this@MainActivity, "Please enable Accessibility Service first to activate Hardcore Mode!", Toast.LENGTH_LONG).show()
+                                    startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                                } else {
+                                    prefs.edit().putBoolean("hardcore_mode", true)
+                                        .putLong("hardcore_unlock_request_time", 0L).apply()
+                                    Toast.makeText(this@MainActivity, "Hardcore Mode Activated!", Toast.LENGTH_SHORT).show()
+                                    updateUI()
+                                }
                             }
                         }
                         .setNegativeButton("Cancel", null)
@@ -627,7 +894,6 @@ class MainActivity : AppCompatActivity() {
         updateUI()
     }
 
-    // --- BEDTIME UI LOGIC ---
     private fun setupBedtimeUI(layout: LinearLayout, textColor: Int, btnBg: Int, btnText: Int) {
         val prefs = getSharedPreferences("BedtimePrefs", Context.MODE_PRIVATE)
 
@@ -652,18 +918,13 @@ class MainActivity : AppCompatActivity() {
         fun updateToggleBtn() {
             val isEnabled = prefs.getBoolean("bedtime_enabled", true)
             toggleBtn.text = if (isEnabled) "Status: ON (Tap to Disable)" else "Status: OFF (Tap to Enable)"
-
-            if (isEnabled) {
-                toggleBtn.setTextColor(Color.parseColor("#32D74B"))
-            } else {
-                toggleBtn.setTextColor(Color.parseColor("#FF453A"))
-            }
+            toggleBtn.setTextColor(if (isEnabled) Color.parseColor("#32D74B") else Color.parseColor("#FF453A"))
         }
         updateToggleBtn()
 
         toggleBtn.setOnClickListener {
             if (isAppLocked()) {
-                Toast.makeText(this, "Settings locked by Hardcore Mode! Request an unlock first.", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "Settings locked by Hardcore Mode!", Toast.LENGTH_LONG).show()
                 return@setOnClickListener
             }
 
@@ -681,35 +942,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // --- SEPARATE APP TIMER UI LOGIC ---
-    private fun setupAppTimerUI(layout: LinearLayout, prefix: String, textColor: Int, btnBg: Int, btnText: Int) {
-        val prefs = getSharedPreferences("AppTimerPrefs", Context.MODE_PRIVATE)
-
-        val tvStats = TextView(this).apply {
-            textSize = 15f
-            setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL))
-            setTextColor(textColor)
-            gravity = Gravity.CENTER
-            setPadding(0, 20, 0, 30)
-        }
-
-        fun updateStats() {
-            val limitMins = prefs.getInt("${prefix}_limit_mins", 10)
-            val cooldownHours = prefs.getInt("${prefix}_cooldown_hours", 1)
-            tvStats.text = "Daily Limit: $limitMins Mins\nCooldown: $cooldownHours Hour(s)"
-        }
-        updateStats()
-
-        layout.addView(tvStats)
-        addButtonToCard(layout, "Set Daily Limit (Mins)", btnBg, btnText) {
-            showNumberDialog("Daily Limit (Mins)", "AppTimerPrefs", "${prefix}_limit_mins", 10) { updateStats() }
-        }
-        addButtonToCard(layout, "Set Cooldown (Hours)", btnBg, btnText) {
-            showNumberDialog("Cooldown (Hours)", "AppTimerPrefs", "${prefix}_cooldown_hours", 1) { updateStats() }
-        }
-    }
-
-    // --- REUSABLE DIALOG LOGIC ---
     private fun showNumberDialog(title: String, prefsName: String, key: String, defaultVal: Int, minVal: Int = 1, maxVal: Int = Int.MAX_VALUE, onSave: (Int) -> Unit) {
         if (isAppLocked()) {
             Toast.makeText(this, "Settings locked by Hardcore Mode! Request an unlock first.", Toast.LENGTH_LONG).show()
@@ -730,7 +962,6 @@ class MainActivity : AppCompatActivity() {
         builder.setView(container)
         builder.setPositiveButton("Save") { _, _ ->
             var num = input.text.toString().toIntOrNull() ?: defaultVal
-
             if (num < minVal) {
                 num = minVal
                 Toast.makeText(this, "Minimum value allowed is $minVal", Toast.LENGTH_SHORT).show()
@@ -738,7 +969,6 @@ class MainActivity : AppCompatActivity() {
                 num = maxVal
                 Toast.makeText(this, "Maximum value allowed is $maxVal", Toast.LENGTH_SHORT).show()
             }
-
             getSharedPreferences(prefsName, Context.MODE_PRIVATE).edit().putInt(key, num).apply()
             onSave(num)
         }
@@ -748,7 +978,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun showTimePicker(hourKey: String, minuteKey: String, prefs: android.content.SharedPreferences, onSave: () -> Unit) {
         if (isAppLocked()) {
-            Toast.makeText(this, "Settings locked by Hardcore Mode! Request an unlock first.", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Settings locked by Hardcore Mode!", Toast.LENGTH_LONG).show()
             return
         }
 
@@ -779,7 +1009,6 @@ class MainActivity : AppCompatActivity() {
         return Pair(Math.max(0, totalAllowed - used), totalAllowed)
     }
 
-    // --- SYSTEM PERMISSIONS ---
     private fun requestStandardPermissions() {
         val permissions = mutableListOf(Manifest.permission.READ_PHONE_STATE, Manifest.permission.READ_CONTACTS, Manifest.permission.READ_CALL_LOG)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) permissions.add(Manifest.permission.POST_NOTIFICATIONS)
@@ -800,5 +1029,37 @@ class MainActivity : AppCompatActivity() {
                 }
             } else Toast.makeText(this, "Battery optimization already disabled", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    // --- HELPER: Check if Accessibility is Granted ---
+    private fun isAccessibilityServiceEnabled(context: Context): Boolean {
+        val expectedComponentName = "${context.packageName}/${AppBlockerService::class.java.canonicalName}"
+        var accessibilityEnabled = 0
+        try {
+            accessibilityEnabled = Settings.Secure.getInt(
+                context.contentResolver,
+                Settings.Secure.ACCESSIBILITY_ENABLED
+            )
+        } catch (e: Settings.SettingNotFoundException) {
+            // Ignore if setting not found
+        }
+
+        if (accessibilityEnabled == 1) {
+            val settingValue = Settings.Secure.getString(
+                context.contentResolver,
+                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+            )
+            if (settingValue != null) {
+                val splitter = TextUtils.SimpleStringSplitter(':')
+                splitter.setString(settingValue)
+                while (splitter.hasNext()) {
+                    val accessibilityService = splitter.next()
+                    if (accessibilityService.equals(expectedComponentName, ignoreCase = true)) {
+                        return true
+                    }
+                }
+            }
+        }
+        return false
     }
 }
